@@ -1,31 +1,37 @@
-Example Summary
-----------------
-This example is intended to be a starting point for new development where
-a fuller set of kernel features and debug capabilities are enabled.
+SECTIONS
+headers
+definitions
+global variables
+initialization functions
+bluetooth print
+sensor reading
+led
+other functions
+motor
+main
 
-Peripherals Exercised
----------------------
-Board_LED0  Indicates that the board was initialized within main()
+PINS
+-----sensors-----
+PE3 front sensor 
+PE2 side(right) sensor 
 
-Example Usage
--------------
-The example lights Board_LED0 as part of the initialization in main().
-Then a heartBeat task toggles the LED at a rate determined by the arg0 parameter
-for the constructed Task instance in the .c file.
+----motors-----
+PD0 for phase A
+PA6 for PWM output motor A
+PD1 for phase B
+PA7 for PWM output motor B
+PD2 for mode
 
-Application Design Details
---------------------------
-This examples is the same as the "Empty (Minimal)" example except many
-development and debug features are enabled. For example:
-    - Logging is enabled
-    - Assert checking is enabled
-    - Kernel Idle task
-    - Stack overflow checking
-    - Default kernel heap is present
+-----bluetooth-----
+PE5 for Rx
+PE4 for Tx
+GND
+3.3V
 
-Please refer to the "Memory Footprint Reduction" section in the TI-RTOS User
-Guide (spruhd4.pdf) for a complete and detailed list of the differences
-between the empty minimal and empty projects.
+-----commands-----
+GG start motor GREEN
+SS stop motor RED
+LL low speed BLUE
+MM medium speed BLUE
+HH high speed BLUE
 
-For GNU and IAR users, please read the following website for details about semi-hosting
-http://processors.wiki.ti.com/index.php/TI-RTOS_Examples_SemiHosting.

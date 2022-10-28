@@ -146,7 +146,7 @@ void uartInit(void)
     GPIOPinTypeUART(GPIO_PORTE_BASE, GPIO_PIN_4 | GPIO_PIN_5);
     // configure UART, 9600 8-n-1
     UARTConfigSetExpClk(
-            UART5_BASE, SysCtlClockGet(), 115200,
+            UART5_BASE, SysCtlClockGet(), 9600,
             (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE)); // 115200 for BT, 9600 for virtual
     // enable UART0
     UARTEnable(UART5_BASE);
@@ -258,7 +258,6 @@ void hardwareInit(void)
     pwmInit();
     rgbInit();
     startMotor();
-    setSpeed(8000, 8000);
     //SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB); // for light sensor
 }
 
@@ -478,9 +477,9 @@ void PIDController(void)
     TimerIntClear(TIMER2_BASE, TIMER_TIMA_TIMEOUT);
     int32_t totalSummation = 0;
     int32_t diff;
-    rightRead(); //stored in adcValR
-    frontRead(); //stored in adcValF
-    rgbSwitch(adcValR);
+    frontRead();
+    rightRead();
+    rgbSwitch(adcValF);
 
     currDiff = adcValR - constantADC;
 
@@ -494,37 +493,56 @@ void PIDController(void)
     D = D_MULT * diff;
 
     pulseWidth = (int32_t) abs(P + I + D);
-
-//    if (adcValF < 1000)
+    startMotor();
+//
+//    if (adcValF > 700)
 //    {
-//        GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_2, 0xFF); // 1 : backward
-//        GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_3, 0x00); // 0: forward
-//        pwmAdjustLeft = maxSpeed;
-//        pwmAdjustRight = maxSpeed;
+//
+//        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0xFF); //reverse direction for left wheel (pin 0)
+//        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00);
+//        pwmAdjustRight = 6000;
+//        pwmAdjustLeft = 6000;
+//
 //    }
 
-    startMotor();
-    if (currDiff < -1)
+    if (adcValF > 2000)
     {
-        speed1 = pwmAdjustLeft - pulseWidth;
-        speed2 = pwmAdjustRight + pulseWidth;
-        pwmAdjustLeft = check_speed(speed1);
-        pwmAdjustRight = check_speed(speed2);
-    }
-    else if (currDiff > 1)
-    {
-        speed1 = pwmAdjustLeft + pulseWidth;
-        speed2 = pwmAdjustRight - pulseWidth;
-        pwmAdjustLeft = check_speed(speed1);
-        pwmAdjustRight = check_speed(speed2);
+        while (adcValF > 1500)
+        {
+            pwmAdjustRight = 2000;
+            pwmAdjustLeft = 2000;
+            GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0xFF); //reverse direction for left wheel (pin 0)
+            setSpeed(pwmAdjustLeft, pwmAdjustRight);
+            frontRead();
+        }
+        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00); //reverse direction for left wheel (pin 0)
+
+        setSpeed(pwmAdjustLeft / 2, pwmAdjustRight / 2);
     }
     else
     {
-        pwmAdjustLeft = 8000;
-        pwmAdjustRight = 8000;
+        if (currDiff < -1)
+        {
+            speed1 = pwmAdjustLeft - pulseWidth;
+            speed2 = pwmAdjustRight + pulseWidth;
+            pwmAdjustLeft = check_speed(speed1);
+            pwmAdjustRight = check_speed(speed2);
+        }
+        else if (currDiff > 1)
+        {
+            speed1 = pwmAdjustLeft + pulseWidth;
+            speed2 = pwmAdjustRight - pulseWidth;
+            pwmAdjustLeft = check_speed(speed1);
+            pwmAdjustRight = check_speed(speed2);
+        }
+        else
+        {
+            pwmAdjustLeft = 8000;
+            pwmAdjustRight = 8000;
+        }
+        setSpeed(pwmAdjustLeft, pwmAdjustRight);
     }
 
-    setSpeed(pwmAdjustLeft, pwmAdjustRight); // purposefully flipping it because our wiring is opposite
 }
 
 /* MAIN -----------------------------------------------------------------*/

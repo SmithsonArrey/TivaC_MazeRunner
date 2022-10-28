@@ -29,7 +29,13 @@
 		<link>
 			<name>uartstdio.c</name>
 			<type>1</type>
-			<locationURI>PARENT-1-SW_ROOT/TivaWare_C_Series-2.1.4.178/utils/uartstdio.c</locationURI>
+			<locationURI>SW_ROOT/utils/uartstdio.c</locationURI>
 		</link>
 	</linkedResources>
+	<variableList>
+		<variable>
+			<name>SW_ROOT</name>
+			<value>file:/C:/ti/TivaWare_C_Series-2.1.4.178</value>
+		</variable>
+	</variableList>
 </projectDescription>
