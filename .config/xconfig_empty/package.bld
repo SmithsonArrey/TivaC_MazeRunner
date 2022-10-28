@@ -11,7 +11,7 @@ var makeAssembly = false;
 var Executable = xdc.module('xdc.bld.Executable');
 
 var exeOpts = new Executable.Attrs({
-        cfgScript: 'C:/Users/aline/workspace_v10/team_8/empty.cfg',
+        cfgScript: 'C:/Users/email/workspace_v10/Team_17/TivaC_MazeRunner/empty.cfg',
         profile: 'release',
         cfgHome: 'xconfig_empty',
 });
@@ -40,8 +40,8 @@ else {
 }
 
 var thisObj = {
-    cfg:        'C:/Users/aline/workspace_v10/team_8/empty.cfg',
-    outputPath: 'C:/Users/aline/workspace_v10/team_8/.config/xconfig_empty',
+    cfg:        'C:/Users/email/workspace_v10/Team_17/TivaC_MazeRunner/empty.cfg',
+    outputPath: 'C:/Users/email/workspace_v10/Team_17/TivaC_MazeRunner/.config/xconfig_empty',
     exeName:    'empty' + suffix,
     exeIntName: 'empty' + suffix.replace('.', '_'),
     targ:       targ,
