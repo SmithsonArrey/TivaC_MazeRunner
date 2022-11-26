@@ -83,9 +83,6 @@
 #define minVal 900 // min speed
 #define PWMFREQ 2600
 #define SETPOINT 6 // in cm
-//#define P_MULT 150
-//#define I_MULT 5
-//#define D_MULT 75
 
 /* GLOBAL VARIABLES ---------------------------------------------------*/
 uint32_t adcValF; // front reading
@@ -103,16 +100,74 @@ int16_t totalSummation = 0;
 float P_MULT = 0.7;
 float I_MULT = 0.01;
 float D_MULT = 0.0015;
-int32_t maxSpeed = 1000; // PWM max = 1000
+int32_t maxSpeed = 2000; //
 int32_t minSpeed = 350;
 int32_t pwmAdjustLeft, pwmAdjustRight;
+
 int32_t currDiff = 0;
-int32_t prevDiff = 0;
+
 int32_t speed1, speed2;
-uint32_t constantADC = 1000; //1350
+uint32_t constantADC = 1100; //1350
 float P, I, D;
 int32_t pulseWidth;
-Swi_Handle swi0, swi1;
+
+
+//#define TASKSTACKSIZE   512
+//
+//Task_Struct task0Struct;
+//Char task0Stack[TASKSTACKSIZE];
+//extern const ti_sysbios_knl_Semaphore_Handle semPID;
+//extern const ti_sysbios_knl_Swi_Handle swi0;
+
+//Menu Functions
+void Run();
+void PWMDisable();
+void LightGet();
+void ToggleData();
+void PostDriveSemaphore();
+void EmergencyStop();
+void DriverClockStart();
+void stopMotor();
+
+typedef void (*function)();
+
+struct functions {
+    char command[2];
+    function func;
+};
+
+struct functions commands[7] = {
+    { "GO", Run },
+    { "P0", PWMDisable },
+    { "LG", LightGet },
+    { "TD", ToggleData },
+    { "DS", PostDriveSemaphore },
+    { "ES", EmergencyStop },
+    { "DC", DriverClockStart }
+};
+
+//TIME CALCULATION
+int s = 0;
+int ms = 0;
+
+//LINE DETECTION
+int blackwidth = 0;
+int SingleBlackLine = 15;
+int line = 0;
+void BlackLineDetection();
+
+
+//DATA COLLECTION
+volatile uint16_t prevDiff = 0;
+bool recording = false;
+//bool running = false;
+
+uint16_t data;
+
+// HELPER FUNCTIONS
+void reverse(char* str, int len);
+char* itoa(int num, char* str, int base);
+
 
 /* FUNCTION DEFINITIONS --------------------------------------------------------------------------------------------------------*/
 void hardwareInit(void);
@@ -121,6 +176,7 @@ void timerInit(void);
 void adcInit(void);
 void pwmInit(void);
 void rgbInit(void);
+void gpio_init(void);
 
 void bluetoothMessage(char *array);
 
@@ -138,24 +194,188 @@ void delay(void);
 void PIDController(void);
 
 /* INITIALIZATION FUNCTIONS ----------------------------------------------------------------------------------------------------*/
+//Configure 2 timers to get the amount of time it takes robot to complete maze
+void MazeTimer(){
+    //Set CPU Clock to 40MHz. 400MHz PLL/2 = 200 DIV 5 = 40MHz
+    SysCtlClockSet(SYSCTL_SYSDIV_5|SYSCTL_USE_PLL|SYSCTL_XTAL_16MHZ|SYSCTL_OSC_MAIN);
+    // WTimer3 Configuration
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER3);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_WTIMER3)) {
+    }
+    TimerClockSourceSet(WTIMER3_BASE, TIMER_CLOCK_SYSTEM);
+
+    //Configure WTimer3B Periodic Mode
+    TimerConfigure(WTIMER3_BASE, TIMER_CFG_B_PERIODIC | TIMER_CFG_SPLIT_PAIR );
+    //period = (0.01 sec)
+    TimerLoadSet(WTIMER3_BASE, TIMER_B, 40000000/100);
+    TimerIntEnable(WTIMER3_BASE, TIMER_TIMB_TIMEOUT);
+
+}
+void milliseconds(){
+    TimerIntClear(WTIMER3_BASE, TIMER_TIMB_TIMEOUT);
+
+    if(ms == 99){
+        ms = 0;
+        s++;
+    } else {
+        ms++;
+    }
+
+}
+
+
+/*This function starts being triggered every 100 ms once the first black
+ * single line is cross. The time is enabled in the BlackLineDetection()
+ * function. This function handles the data collection. First the buffer
+ * is filled. Once full, the buffer is switched and the SWI is called. The
+ * SWI is where the green LED is taken care of and the data is transmitter
+ * CHAR by CHAR*/
+
+char ping[20];
+char pong[20];
+int pingCounter = 0;
+int pongCounter = 0;
+bool pingPrinted = false;
+char bufferChar[2];
+
+volatile char *active = ping;
+
+void CollectData(){
+
+    //TimerIntClear(WTIMER1_BASE, TIMER_TIMA_TIMEOUT);
+
+    //fill buffer with prevDiff value calculated in PID function
+
+    //format data
+
+    data = (uint16_t)abs(prevDiff);
+
+    if (data == 0){
+        bufferChar[0] = '0';
+        bufferChar[1] = '0';
+
+    } else {
+        itoa(data, bufferChar, 16);
+    }
+
+    //fill ping buffer
+    if (pongCounter < 20){
+        if (pingCounter < 20){
+            ping[pingCounter] = bufferChar[0];
+            pingCounter++;
+            ping[pingCounter] = bufferChar[1];
+            pingCounter++;
+        } else { // ping is full
+            // print ping
+            if (!(pingPrinted)){
+                Swi_post(swi0);
+                pingPrinted = true;
+                active = pong;
+            }
+            // write in pong
+            pong[pongCounter] = bufferChar[0];
+            pongCounter++;
+            pong[pongCounter] = bufferChar[1];
+            pongCounter++;
+        }
+    } else {
+    //fill pong buffer
+        // pong is full
+        // print pong
+        Swi_post(swi0);
+        pingCounter = 0;
+        pongCounter = 0;
+        pingPrinted = false;
+        active = ping;
+    }
+}
+
+//SWI transmitting data
+void TransmitData(){
+
+    //turn off blue led and turn on green one to indicate data is being transmitted
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, 0x0);
+
+    UARTCharPut(UART5_BASE, ':');
+    UARTCharPut(UART5_BASE, '1');
+    UARTCharPut(UART5_BASE, '7');
+    int i;
+
+    for(i = 0; i < 20; i++){
+      UARTCharPut(UART5_BASE, active[i]);
+    }
+
+    UARTCharPut(UART5_BASE, '1');
+    UARTCharPut(UART5_BASE, '7');
+    UARTCharPut(UART5_BASE, '\r');
+    UARTCharPut(UART5_BASE, '\n');
+
+    //turn off green led and turn on blue one to indicate data transmission stopped
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, 0x0);
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+}
+
+//Configure a Timer to trigger an interrupt every 5ms
+void LightSensorTimerInit(){
+    //Configure Timer0
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER0);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_WTIMER0)) {
+
+    }
+
+    uint32_t Period = SysCtlClockGet();
+    //Set Clock Source
+    TimerClockSourceSet(WTIMER0_BASE, TIMER_CLOCK_SYSTEM);
+    //Configure WTimer2 Periodic Mode
+    TimerConfigure(WTIMER0_BASE, TIMER_CFG_B_PERIODIC | TIMER_CFG_SPLIT_PAIR );
+    //Load WTimer2 with a period of 0.005 s
+    TimerLoadSet(WTIMER0_BASE, TIMER_B, (SysCtlClockGet()/1000) * 5);
+    //Enable WTimer2 to trigger an interrupt when period is reached
+    //IntEnable( INT_TIMER0B );
+
+    TimerIntEnable(WTIMER0_BASE, TIMER_TIMB_TIMEOUT);
+    //Enable WTimer2
+    TimerEnable(WTIMER0_BASE, TIMER_B);
+}
+
+//This function is just the handler for the Light SensorTimer which runs every 5 ms.
+//it calls the BlackLineDetection() sensor to handle thin vs thick line and data collection
+void LightSensorTimerHandler(){
+    TimerIntClear(WTIMER0_BASE, TIMER_TIMB_TIMEOUT);
+    BlackLineDetection();
+}
+
 void uartInit(void)
 {
-    // bluetooth
+    // set system clock (will be 40 MHz)
+    SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
+    // enable Port E for GPIO and UART5
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART5);
+    // configure PE4 as receiver (Rx)
     GPIOPinConfigure(GPIO_PE4_U5RX);
+    // configure PE5 as transmitter (Tx)
     GPIOPinConfigure(GPIO_PE5_U5TX);
+    // configure PB0 and PB1 for input
     GPIOPinTypeUART(GPIO_PORTE_BASE, GPIO_PIN_4 | GPIO_PIN_5);
     // configure UART, 9600 8-n-1
-    UARTConfigSetExpClk(
-            UART5_BASE, SysCtlClockGet(), 9600,
-            (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE)); // 115200 for BT, 9600 for virtual
-    // enable UART0
+    UARTConfigSetExpClk(UART5_BASE, SysCtlClockGet(), 115200, (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE));
+    //UARTprintf function
+
     UARTEnable(UART5_BASE);
-    // enable interrupts on processor
+
+    //Enable FIFO
+    UARTFIFOEnable(UART5_BASE);
+    //UARTFIFOLevelSet(UART5_BASE, UART_FIFO_, UART_FIFO_RX5_8);
+
     IntMasterEnable();
-    // enable interrupts on UART0
     IntEnable(INT_UART5);
-    // enable interrupts for UART0, Rx and Tx
+
     UARTIntEnable(UART5_BASE, UART_INT_RX | UART_INT_RT);
+
+    // Initialize the UART for console I/O.
+    UARTStdioConfig(1, 115200, SysCtlClockGet());
 }
 
 void adcInit(void)
@@ -252,13 +472,22 @@ void hardwareInit(void)
     SysCtlClockSet(
     SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_XTAL_16MHZ | SYSCTL_OSC_MAIN);
 
-    timerInit();
-//    uartInit();
     adcInit();
     pwmInit();
     rgbInit();
+    uartInit();
+    gpio_init();
+
+    MazeTimer();
+
+    LightSensorTimerInit();
+
+    timerInit();
+
+
+
     startMotor();
-    //SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB); // for light sensor
+    //light sensor is initialized on every call
 }
 
 /* BLUETOOTH PRINT ------------------------------------------*/
@@ -334,11 +563,15 @@ void commandInterpreter(char command[])
     SysCtlDelay(10000000);
 }
 
-void readCommand(void)
+int count = 0;
+char command[2];
+char commandLet;
+
+
+void readCommand(void) // UART5 INT HANDLER
 {
-    int count = 1;
-    char command[2];
-    char commandLet;
+
+    UARTIntClear(UART5_BASE, UARTIntStatus(UART5_BASE, true)); //clear the asserted interrupts
 
     while (UARTCharsAvail(UART5_BASE))
     {
@@ -351,8 +584,8 @@ void readCommand(void)
         if (count == 2)
         {
             // carriage return and new line
-            UARTCharPut(UART0_BASE, '\r');
-            UARTCharPut(UART0_BASE, '\n');
+            UARTCharPut(UART5_BASE, '\r');
+            UARTCharPut(UART5_BASE, '\n');
             // reset counter
             count = 0;
             // interpret command
@@ -458,99 +691,312 @@ void setSpeed(int16_t left, int16_t right)
     PWMOutputState(PWM1_BASE, PWM_OUT_3_BIT, true);
 }
 
-void uart_int_handler(void)
+
+void delay_us(uint32_t us) // delay in microseconds
 {
-    uint32_t statusInt;
-    statusInt = UARTIntStatus(UART0_BASE, true);
-    UARTIntClear(UART0_BASE, statusInt);
+     SysCtlDelay(us * 13400);
+
 }
 
-void ISR_hwi(void)
-{
-    uart_int_handler();
-    TimerIntClear(TIMER2_BASE, TIMER_TIMA_TIMEOUT);
-    Swi_post(swi0);
+
+void gpio_init(void){
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
 }
 
-void PIDController(void)
-{
-    TimerIntClear(TIMER2_BASE, TIMER_TIMA_TIMEOUT);
-    int32_t totalSummation = 0;
-    int32_t diff;
-    frontRead();
-    rightRead();
-    rgbSwitch(adcValF);
 
-    currDiff = adcValR - constantADC;
+int read_light_sensor(void){
+    int readCycles = 0;
+    uint32_t pinVal;
+    // handle timers
 
-    P = P_MULT * currDiff;
-
-    totalSummation += currDiff;
-    I = I_MULT * totalSummation;
-
-    diff = currDiff - prevDiff;
-    prevDiff = currDiff;
-    D = D_MULT * diff;
-
-    pulseWidth = (int32_t) abs(P + I + D);
-    startMotor();
-//
-//    if (adcValF > 700)
-//    {
-//
-//        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0xFF); //reverse direction for left wheel (pin 0)
-//        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00);
-//        pwmAdjustRight = 6000;
-//        pwmAdjustLeft = 6000;
-//
-//    }
-
-    if (adcValF > 2000)
-    {
-        while (adcValF > 1500)
-        {
-            pwmAdjustRight = 2000;
-            pwmAdjustLeft = 2000;
-            GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0xFF); //reverse direction for left wheel (pin 0)
-            setSpeed(pwmAdjustLeft, pwmAdjustRight);
-            frontRead();
-        }
-        GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00); //reverse direction for left wheel (pin 0)
-
-        setSpeed(pwmAdjustLeft / 2, pwmAdjustRight / 2);
+    // set PB0 high (charge capacitor)
+    GPIOPinTypeGPIOOutput(GPIO_PORTB_BASE, GPIO_PIN_0);
+    GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_0, GPIO_PIN_0);
+    SysCtlDelay(200);
+    // set PB0 for reading input
+    GPIOPinTypeGPIOInput(GPIO_PORTB_BASE, GPIO_PIN_0);
+    // capture fully charged value
+    pinVal = GPIOPinRead(GPIO_PORTB_BASE, GPIO_PIN_0);
+    // count reading cycles
+    while (pinVal & GPIO_PIN_0){
+        pinVal = GPIOPinRead(GPIO_PORTB_BASE, GPIO_PIN_0);
+        readCycles++;
     }
-    else
-    {
-        if (currDiff < -1)
+    SysCtlDelay(200);
+
+    return readCycles;
+
+}
+
+//int lineBuffer[2] = {0,0};
+
+int light;
+void BlackLineDetection(){
+
+
+    //Every 5ms this function will read the real-time light sensor value
+    light = read_light_sensor();
+
+    /*if the light value is anything above 2000 then it is above a black surface
+         * a counter is started to see how many times the BlackLineDetection()
+         * function determined the sensor was over a black surface (every 5ms).
+         * The blackwidth value will allow us to determine whether the line was thin
+         * in thick.
+         */
+        if(light > 6000)
         {
-            speed1 = pwmAdjustLeft - pulseWidth;
-            speed2 = pwmAdjustRight + pulseWidth;
-            pwmAdjustLeft = check_speed(speed1);
-            pwmAdjustRight = check_speed(speed2);
+            blackwidth++;
         }
-        else if (currDiff > 1)
+
+
+        /* If light < 5000 then the reflectance sensor is now reading white.
+         */
+        else {
+
+            /*If blackwidth > 0 then robot just transitioned from black to white. We must
+              now determine whether it is a thin or thick line.*/
+            if(blackwidth > 0) {
+
+                /*For our robot, if the interrupt has <= 11 black readings
+                 * then it is a single black line. We use a global variable counter
+                 * to determine if it is the first or second black line.
+                 */
+                if(blackwidth <= SingleBlackLine){
+
+                    /*if it is the first single black line, then we will turn on blue
+                     * LED and start the timer used to start collecting and transmitting data.
+                     * The timer enabled triggers the DataTimerHandler where buffer is filled
+                     * and SWI is called.*/
+                    if(line == 0){
+                        //Start Data Collection
+                        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
+                        recording = true;
+                        bluetoothMessage("Recording");
+                        //increments the thin line count
+                        line++;
+                    /*if it is the second single black line, the blue LED is turned off and
+                     *the timer is disabled so data collection ends*/
+                    } else if(line == 1){
+                        //Stop Data Collection
+                        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, 0x0);
+                        bluetoothMessage("Not Recording");
+                        //Disable 100ms Timer
+                        //TimerDisable(WTIMER1_BASE, TIMER_A);
+                        recording = false;
+                        line = 0;
+                    }
+
+
+
+                //if time is greater than 11, then it is a thick line and robot is stopped
+                } else {
+                    EmergencyStop();
+                }
+
+                //time is reset to determine thickness of next black line
+                blackwidth = 0;
+
+            }
+        }
+
+}
+
+
+uint8_t elapsed_timer_cycles = 0;
+
+void hwi_main_timer(void) // prev ISR_hwi
+{
+    TimerIntClear(TIMER2_BASE, TIMER_TIMA_TIMEOUT);
+    elapsed_timer_cycles++;
+    if(elapsed_timer_cycles % 2){
+        elapsed_timer_cycles = 0;
+        if(recording){
+            CollectData();
+        }
+    }
+    else{
+
+    }
+    //Semaphore_post(semPID);
+    PIDController();
+}
+
+void PIDController(void) // task
+{
+
+   // while(1){
+
+     //   Semaphore_pend(semPID, BIOS_WAIT_FOREVER);
+
+        int32_t totalSummation = 0;
+        int32_t diff;
+        frontRead();
+        rightRead();
+        rgbSwitch(adcValF);
+
+        currDiff = adcValR - constantADC;
+
+        P = P_MULT * currDiff;
+
+        totalSummation += currDiff;
+        I = I_MULT * totalSummation;
+
+        diff = currDiff - prevDiff;
+        prevDiff = currDiff;
+        D = D_MULT * diff;
+
+        pulseWidth = (int32_t) abs(P + I + D);
+        Run();
+
+        if (adcValF > 2000)
         {
-            speed1 = pwmAdjustLeft + pulseWidth;
-            speed2 = pwmAdjustRight - pulseWidth;
-            pwmAdjustLeft = check_speed(speed1);
-            pwmAdjustRight = check_speed(speed2);
+            while (adcValF > 1500)
+            {
+                pwmAdjustRight = 2000;
+                pwmAdjustLeft = 2000;
+                GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0xFF); //reverse direction for left wheel (pin 0)
+                setSpeed(pwmAdjustLeft, pwmAdjustRight);
+                frontRead();
+            }
+            GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00); //reverse direction for left wheel (pin 0)
+
+            setSpeed(pwmAdjustLeft / 2, pwmAdjustRight / 2);
         }
         else
         {
-            pwmAdjustLeft = 8000;
-            pwmAdjustRight = 8000;
+            if (currDiff < -1)
+            {
+                speed1 = pwmAdjustLeft - pulseWidth;
+                speed2 = pwmAdjustRight + pulseWidth;
+                pwmAdjustLeft = check_speed(speed1);
+                pwmAdjustRight = check_speed(speed2);
+            }
+            else if (currDiff > 1)
+            {
+                speed1 = pwmAdjustLeft + pulseWidth;
+                speed2 = pwmAdjustRight - pulseWidth;
+                pwmAdjustLeft = check_speed(speed1);
+                pwmAdjustRight = check_speed(speed2);
+            }
+            else
+            {
+                pwmAdjustLeft = 8000;
+                pwmAdjustRight = 8000;
+            }
+            setSpeed(pwmAdjustLeft, pwmAdjustRight);
         }
-        setSpeed(pwmAdjustLeft, pwmAdjustRight);
-    }
+    //}
 
 }
+
+
+// int to string
+// taken from https://www.geeksforgeeks.org/implement-itoa/
+void reverse(char* str, int len)
+{
+    int i = 0, j = len - 1, temp;
+    while (i < j) {
+        temp = str[i];
+        str[i] = str[j];
+        str[j] = temp;
+        i++;
+        j--;
+    }
+}
+
+// Implementation of itoa()
+char* itoa(int num, char* str, int base)
+{
+    int i = 0;
+    bool isNegative = false;
+
+    /* Handle 0 explicitly, otherwise empty string is printed for 0 */
+    if (num == 0)
+    {
+        str[i++] = '0';
+        str[i] = '\0';
+        return str;
+    }
+
+    // In standard itoa(), negative numbers are handled only with
+    // base 10. Otherwise numbers are considered unsigned.
+    if (num < 0 && base == 10)
+    {
+        isNegative = true;
+        num = -num;
+    }
+
+    // Process individual digits
+    while (num != 0)
+    {
+        int rem = num % base;
+        str[i++] = (rem > 9)? (rem-10) + 'a' : rem + '0';
+        num = num/base;
+    }
+
+    // If number is negative, append '-'
+    if (isNegative)
+        str[i++] = '-';
+
+    str[i] = '\0'; // Append string terminator
+
+    // Reverse the string
+    reverse(str, i);
+
+    return str;
+}
+
+
+/***************************MENU FUNCTIONS************************************/
+void Run() {
+    //Makes the robot start running
+    startMotor();
+    //forwardMotor();
+    TimerEnable(WTIMER3_BASE, TIMER_B); //Enables 1 ms timer
+}
+void PWMDisable() {
+    UARTprintf("PWM Disable\n");
+}
+void LightGet() {
+    UARTprintf("Light Get\n");
+}
+void ToggleData() {
+    UARTprintf("Toggle Data Acquisition\n");
+}
+void PostDriveSemaphore() {
+    UARTprintf("Post Drive Semaphore\n");
+}
+void EmergencyStop() {
+    bluetoothMessage("Emergency Stop\nEmptying Buffer\n");
+
+    stopMotor();
+    TimerDisable(WTIMER3_BASE, TIMER_B);
+    //UARTprintf("Total Time: %i.%i seconds\n", s, ms);
+    bluetoothMessage("Total Time: ");
+    char k[2];
+    itoa(s,k,10);
+    bluetoothMessage(k);
+    bluetoothMessage(".");
+    itoa(ms,k,10);
+    bluetoothMessage(k);
+    bluetoothMessage("seconds\n");
+    Swi_post(swi0);
+    delay();
+}
+void DriverClockStart() {
+    UARTprintf("Driver Clock Start\n");
+}
+
+
 
 /* MAIN -----------------------------------------------------------------*/
 int main(void)
 {
     hardwareInit();
-//    startMotor();
-    PIDController();
+    Hwi_enable();
+    Swi_enable();
+    Task_enable();
     BIOS_start();
 }
+
 
